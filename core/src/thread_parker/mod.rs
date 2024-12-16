@@ -63,6 +63,9 @@ cfg_if! {
     } else if #[cfg(target_os = "redox")] {
         #[path = "redox.rs"]
         mod imp;
+    }else if #[cfg(target_os = "hermit")] {
+        #[path = "hermit.rs"]
+        mod imp;
     } else if #[cfg(all(target_env = "sgx", target_vendor = "fortanix"))] {
         #[path = "sgx.rs"]
         mod imp;
