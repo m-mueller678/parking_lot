@@ -5,12 +5,14 @@
 // http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
+use hermit_abi::{
+    futex_wait, futex_wake, time_t, timespec, EAGAIN, EINVAL, ETIMEDOUT, FUTEX_RELATIVE_TIMEOUT,
+};
+use std::ops::ControlFlow;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 use std::{ptr, thread};
-
-use hermit_abi::{futex_wait, futex_wake, time_t, timespec, ETIMEDOUT, FUTEX_RELATIVE_TIMEOUT};
 
 const UNPARKED: u32 = 0;
 const PARKED: u32 = 1;
@@ -45,7 +47,10 @@ impl super::ThreadParkerT for ThreadParker {
     #[inline]
     unsafe fn park(&self) {
         while self.futex.load(Acquire) != UNPARKED {
-            self.futex_wait_relative(None);
+            match self.futex_wait_relative(None) {
+                ControlFlow::Break(_) => return,
+                ControlFlow::Continue(()) => continue,
+            }
         }
     }
 
@@ -68,7 +73,10 @@ impl super::ThreadParkerT for ThreadParker {
             };
             // ideally, we would specify an absolute timespec,
             // but it is currently not possible to extract one from Instant
-            self.futex_wait_relative(Some(ts));
+            match self.futex_wait_relative(Some(ts)) {
+                ControlFlow::Break(x) => return x,
+                ControlFlow::Continue(()) => continue,
+            }
         }
         true
     }
@@ -84,7 +92,7 @@ impl super::ThreadParkerT for ThreadParker {
 
 impl ThreadParker {
     #[inline]
-    fn futex_wait_relative(&self, ts: Option<timespec>) -> bool {
+    fn futex_wait_relative(&self, ts: Option<timespec>) -> ControlFlow<bool, ()> {
         let r = unsafe {
             futex_wait(
                 self.ptr(),
@@ -96,11 +104,13 @@ impl ThreadParker {
             )
         };
         if r == 0 {
-            true
-        } else {
-            check_futex_wait_return(-ETIMEDOUT, r);
-            false
+            return ControlFlow::Break(true);
+        } else if r == -ETIMEDOUT {
+            return ControlFlow::Break(false);
+        } else if r != -EAGAIN {
+            futex_return_unexpected(r);
         }
+        ControlFlow::Continue(())
     }
 
     #[inline]
@@ -109,11 +119,10 @@ impl ThreadParker {
     }
 }
 
-fn check_futex_wait_return(expected: i32, actual: i32) {
-    debug_assert!(
-        expected == actual,
-        "futex_wait returned an unexpected value: {actual}"
-    );
+fn futex_return_unexpected(x: i32) {
+    if cfg!(debug_assertions) {
+        panic!("futex returned an unexpected value: {x}")
+    }
 }
 
 pub struct UnparkHandle {
@@ -127,7 +136,7 @@ impl super::UnparkHandleT for UnparkHandle {
         // does not actually inspect the pointed data. It only uses the address as a key.
         let r = unsafe { futex_wake(self.futex, i32::MAX) };
         if r < 0 || r > 1 {
-            check_futex_wait_return(1, r);
+            futex_return_unexpected(r);
         }
     }
 }
